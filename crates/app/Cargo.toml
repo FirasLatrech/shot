@@ -1,0 +1,32 @@
+[package]
+name = "shot"
+description = "A native macOS screenshot tool: capture, annotate, pin, OCR"
+publish = false
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+shot-core = { path = "../shot-core" }
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia.workspace = true
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-vision = "0.3"
+block2 = "0.6"
+global-hotkey = "0.8"
+objc2-quartz-core = "0.3"
+dirs = "6"
+
+[lints]
+workspace = true

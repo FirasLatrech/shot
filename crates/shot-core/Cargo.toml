@@ -1,0 +1,22 @@
+[package]
+name = "shot-core"
+description = "Platform-independent model, rendering and storage for Shot"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia.workspace = true
+ab_glyph.workspace = true
+image.workspace = true
+base64 = "0.22"
+
+[lints]
+workspace = true
