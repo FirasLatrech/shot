@@ -4,7 +4,7 @@ members = ["crates/shot-core", "crates/app"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT"
 authors = ["Firas Latrach"]
 rust-version = "1.85"

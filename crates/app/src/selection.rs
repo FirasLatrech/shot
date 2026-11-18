@@ -11,7 +11,7 @@ use std::{
 use image::RgbaImage;
 use objc2::{rc::Retained, sel, MainThreadOnly};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSFont, NSPopUpButton, NSStackView, NSTextField,
+    NSButton, NSCursor, NSEvent, NSEventModifierFlags, NSFont, NSPopUpButton, NSStackView, NSTextField,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowCollectionBehavior,
 };
 use objc2_core_foundation::{CFRetained, CGFloat};
@@ -80,6 +80,8 @@ struct State {
     drag: Option<Drag>,
     hover: Option<usize>,
     aspect: Option<f32>,
+    /// A selection already existed when the current click started.
+    had_rect: bool,
 }
 
 pub struct Selection {
@@ -283,6 +285,11 @@ impl Selection {
         deliver(img, CaptureKind::Window, Output::Capture);
     }
 
+    /// All-In-One and recording keep the selection adjustable, with a toolbar.
+    fn adjustable(&self) -> bool {
+        matches!(self.mode.get(), Mode::AllInOne | Mode::Record)
+    }
+
     fn handle_at(rect: Rect, p: Pt) -> Option<usize> {
         rect.handles(HANDLE).iter().position(|h| h.inflate(4.0).contains(p))
     }
@@ -290,7 +297,7 @@ impl Selection {
     // ------------------------------------------------------------ All-In-One toolbar
 
     fn sync_toolbar(self: &Rc<Self>) {
-        if self.mode.get() != Mode::AllInOne {
+        if !self.adjustable() {
             return;
         }
         let rect = self.state.borrow().rect;
@@ -326,6 +333,33 @@ impl Selection {
         let x = (local.center().x - size.width as f32 / 2.0).clamp(8.0, (b.w - size.width as f32 - 8.0).max(8.0));
         bar.setFrame(NSRect::new(NSPoint::new(x as f64, y as f64), size));
         bar.setHidden(false);
+    }
+
+    /// Recording toolbar: microphone and system audio switches, and Record.
+    fn record_controls(&self, mtm: MainThreadMarker, record: impl Fn() + 'static) -> Vec<Retained<NSView>> {
+        let toggle = |title: &str,
+                      get: fn(&shot_core::settings::Settings) -> bool,
+                      set: fn(&mut shot_core::settings::Settings, bool)| {
+            let t = self.targets.add(mtm, move |sender| {
+                let Some(b) = ui::sender::<NSButton>(sender) else { return };
+                let app = app();
+                set(&mut app.settings.borrow_mut(), b.state() != 0);
+                app.save_settings();
+                app.rebuild_menu();
+            });
+            let b = unsafe {
+                NSButton::checkboxWithTitle_target_action(&NSString::from_str(title), Some(&t), Some(sel!(fire:)), mtm)
+            };
+            b.setState(isize::from(get(&app().settings.borrow())));
+            Retained::into_super(Retained::into_super(b))
+        };
+        let button = ui::text_button(mtm, &self.targets, "Record ⏎", record);
+        button.setBezelColor(Some(&objc2_app_kit::NSColor::systemRedColor()));
+        vec![
+            toggle("Microphone", |s| s.record_microphone, |s, v| s.record_microphone = v),
+            toggle("System Audio", |s| s.record_system_audio, |s, v| s.record_system_audio = v),
+            Retained::into_super(Retained::into_super(button)),
+        ]
     }
 
     fn build_toolbar(self: &Rc<Self>) -> Toolbar {
@@ -387,53 +421,59 @@ impl Selection {
             }
         }
 
-        let views: Vec<Retained<NSView>> = vec![
+        let mut views: Vec<Retained<NSView>> = vec![
             Retained::into_super(Retained::into_super(Retained::into_super(aspect))),
             Retained::into_super(Retained::into_super(wf.clone())),
             Retained::into_super(Retained::into_super(NSTextField::labelWithString(&NSString::from_str("×"), mtm))),
             Retained::into_super(Retained::into_super(hf.clone())),
-            Retained::into_super(Retained::into_super(ui::icon_button(
-                mtm,
-                &self.targets,
-                "text.viewfinder",
-                "Capture Text",
-                act(Output::Text),
-            ))),
-            Retained::into_super(Retained::into_super(ui::icon_button(
-                mtm,
-                &self.targets,
-                "pin",
-                "Pin",
-                act(Output::Pin),
-            ))),
-            Retained::into_super(Retained::into_super(ui::icon_button(
-                mtm,
-                &self.targets,
-                "pencil.tip.crop.circle",
-                "Annotate",
-                act(Output::Annotate),
-            ))),
-            Retained::into_super(Retained::into_super(ui::icon_button(
-                mtm,
-                &self.targets,
-                "square.and.arrow.down",
-                "Save",
-                act(Output::Save),
-            ))),
-            Retained::into_super(Retained::into_super(ui::icon_button(
-                mtm,
-                &self.targets,
-                "doc.on.doc",
-                "Copy",
-                act(Output::Copy),
-            ))),
-            Retained::into_super(Retained::into_super(ui::text_button(
-                mtm,
-                &self.targets,
-                "Capture ⏎",
-                act(Output::Capture),
-            ))),
         ];
+        if self.mode.get() == Mode::Record {
+            views.extend(self.record_controls(mtm, act(Output::Capture)));
+        } else {
+            views.extend::<Vec<Retained<NSView>>>(vec![
+                Retained::into_super(Retained::into_super(ui::icon_button(
+                    mtm,
+                    &self.targets,
+                    "text.viewfinder",
+                    "Capture Text",
+                    act(Output::Text),
+                ))),
+                Retained::into_super(Retained::into_super(ui::icon_button(
+                    mtm,
+                    &self.targets,
+                    "pin",
+                    "Pin",
+                    act(Output::Pin),
+                ))),
+                Retained::into_super(Retained::into_super(ui::icon_button(
+                    mtm,
+                    &self.targets,
+                    "pencil.tip.crop.circle",
+                    "Annotate",
+                    act(Output::Annotate),
+                ))),
+                Retained::into_super(Retained::into_super(ui::icon_button(
+                    mtm,
+                    &self.targets,
+                    "square.and.arrow.down",
+                    "Save",
+                    act(Output::Save),
+                ))),
+                Retained::into_super(Retained::into_super(ui::icon_button(
+                    mtm,
+                    &self.targets,
+                    "doc.on.doc",
+                    "Copy",
+                    act(Output::Copy),
+                ))),
+                Retained::into_super(Retained::into_super(ui::text_button(
+                    mtm,
+                    &self.targets,
+                    "Capture ⏎",
+                    act(Output::Capture),
+                ))),
+            ]);
+        }
         let bar = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&views), mtm);
         bar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         bar.setSpacing(6.0);
@@ -503,10 +543,10 @@ impl Selection {
             gfx::stroke(c, r.inflate(0.5), 1.0, gfx::WHITE);
             let k = s.display.scale as f32;
             let label = format!("{} × {}", (r.w * k).round(), (r.h * k).round());
-            if st.drag.is_some() || self.mode.get() != Mode::AllInOne {
+            if st.drag.is_some() || !self.adjustable() {
                 gfx::pill(&label, r.x, (r.y - 26.0).max(4.0), 11.0);
             }
-            if self.mode.get() == Mode::AllInOne && st.drag.is_none() {
+            if self.adjustable() && st.drag.is_none() {
                 for h in r.handles(HANDLE) {
                     gfx::fill_ellipse(c, h, gfx::WHITE);
                     gfx::stroke_ellipse(c, h, 1.0, (0.0, 0.0, 0.0, 0.4));
@@ -530,7 +570,7 @@ impl Selection {
             let text = match self.mode.get() {
                 Mode::Text => "Drag over text to copy it • Esc: cancel",
                 Mode::SelfTimer => "Drag the area for the self-timer • Esc: cancel",
-                Mode::Record => "Drag to record an area • Click: window or whole screen • Esc: cancel",
+                Mode::Record => "Drag to record an area • Click: a window or the whole screen • Esc: cancel",
                 Mode::AllInOne => "Drag to select • Enter: capture • Esc: cancel",
                 _ => "Drag to capture • Click: window • Space: window mode • Esc: cancel",
             };
@@ -560,7 +600,8 @@ impl ViewDelegate for Selection {
         }
         let mut st = self.state.borrow_mut();
         st.cursor = g;
-        st.drag = Some(match st.rect.filter(|_| self.mode.get() == Mode::AllInOne) {
+        st.had_rect = st.rect.is_some();
+        st.drag = Some(match st.rect.filter(|_| self.adjustable()) {
             Some(r) => match Self::handle_at(r, g) {
                 Some(h) => Drag::Resize(h, r),
                 None if r.contains(g) => Drag::Move(g, r),
@@ -616,14 +657,16 @@ impl ViewDelegate for Selection {
         };
         let tiny = rect.is_none_or(|r| r.w < 4.0 || r.h < 4.0);
         if tiny && matches!(drag, Some(Drag::New(_))) {
+            // Recording with an area already selected: a click elsewhere only clears it.
+            let record_click = mode == Mode::Record && !self.state.borrow().had_rect;
             // A plain click: capture the window under the cursor.
-            if matches!(mode, Mode::Area | Mode::Record) {
+            if mode == Mode::Area || record_click {
                 if let Some(i) = self.windows.iter().position(|w| w.bounds.contains(g)) {
                     return self.finish_window(i);
                 }
             }
             // Recording: a click on the desktop records the whole display.
-            if mode == Mode::Record {
+            if record_click {
                 self.close();
                 return crate::record::start(crate::record::Target::Display(g));
             }
@@ -632,7 +675,7 @@ impl ViewDelegate for Selection {
             return;
         }
         match (mode, rect) {
-            (Mode::AllInOne, _) => {
+            (Mode::AllInOne | Mode::Record, _) => {
                 // Keep the selection adjustable until the user confirms.
                 if let Some(rc) = app().selection.borrow().clone() {
                     rc.sync_toolbar();

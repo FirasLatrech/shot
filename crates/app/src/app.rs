@@ -121,12 +121,19 @@ pub fn start(mtm: MainThreadMarker) {
     // `shot <action>` triggers an action at launch, e.g. `shot area`.
     // Also `shot settings` and `shot open <image or .shot file>`.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // `shot record-to <file.mp4> <seconds>`: records the main display, then quits.
+    // `shot record-to <file.mp4> [seconds] [x,y,w,h]`: records the main display
+    // (or that area, in points), then quits.
     if let (Some("record-to"), Some(file)) = (args.first().map(String::as_str), args.get(1)) {
         let secs = args.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(5.0);
         let file = PathBuf::from(file);
-        let center = capture::displays(mtm).first().map_or(shot_core::Pt::new(0.0, 0.0), |d| d.bounds.center());
-        after(0.3, move || record::start_to(record::Target::Display(center), Some(file)));
+        let area: Option<Vec<f32>> = args.get(3).map(|a| a.split(',').filter_map(|n| n.trim().parse().ok()).collect());
+        let target = match area.as_deref() {
+            Some(&[x, y, w, h]) => record::Target::Area(shot_core::Rect::new(x, y, w, h)),
+            _ => record::Target::Display(
+                capture::displays(mtm).first().map_or(shot_core::Pt::new(0.0, 0.0), |d| d.bounds.center()),
+            ),
+        };
+        after(0.3, move || record::start_to(target, Some(file)));
         after(0.3 + secs, || {
             record::stop_then(|| NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None))
         });
@@ -389,6 +396,34 @@ impl App {
         menu.addItem(&sep());
         menu.addItem(&action(Action::RecordScreen, "record.circle"));
         menu.addItem(&action(Action::RecordFullscreen, "video"));
+        let (mic, system_audio) = {
+            let s = self.settings.borrow();
+            (s.record_microphone, s.record_system_audio)
+        };
+        for (title, symbol, on, set) in [
+            (
+                "Record Microphone",
+                "mic",
+                mic,
+                (|s: &mut Settings, v| s.record_microphone = v) as fn(&mut Settings, bool),
+            ),
+            ("Record System Audio", "speaker.wave.2", system_audio, |s: &mut Settings, v| s.record_system_audio = v),
+        ] {
+            let toggle = item(
+                title,
+                symbol,
+                None,
+                Box::new(move || {
+                    let app = app();
+                    set(&mut app.settings.borrow_mut(), !on);
+                    app.save_settings();
+                    app.rebuild_menu();
+                }),
+            );
+            toggle.setState(isize::from(on));
+            toggle.setIndentationLevel(1);
+            menu.addItem(&toggle);
+        }
         menu.addItem(&sep());
         menu.addItem(&action(Action::CaptureText, "text.viewfinder"));
         menu.addItem(&sep());

@@ -6,6 +6,10 @@
 //!
 //! ScreenCaptureKit calls back on its own threads, so callbacks only send
 //! [`Event`]s over a channel; the main thread polls it and owns all state.
+//!
+//! The one rule that matters: once a stream exists, the session ends only
+//! after the stream has been told to stop and the file reported finished (or
+//! a timeout passed). Dropping a live stream leaves it writing forever.
 
 use std::{
     cell::RefCell,
@@ -33,6 +37,9 @@ use crate::{
     capture, ui,
 };
 
+/// How long to wait for the file to be finished after asking to stop.
+const STOP_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// What to record, in global CG points.
 #[derive(Debug, Clone, Copy)]
 pub enum Target {
@@ -47,9 +54,16 @@ pub enum Target {
 
 enum Event {
     Content(Result<Sendable<Retained<SCShareableContent>>, String>),
-    Started,
+    /// `startCapture` finished; `Err` means nothing is being captured.
+    CaptureStarted(Result<(), String>),
+    /// The recording output wrote its first frames.
+    RecordingStarted,
+    /// The movie file is complete.
     Finished,
-    Failed(String),
+    /// The recording or the stream failed while live.
+    Error(String),
+    /// `stopCapture` finished.
+    CaptureStopped,
 }
 
 /// ScreenCaptureKit objects are thread-safe; this only moves a result from
@@ -58,11 +72,14 @@ struct Sendable<T>(T);
 unsafe impl<T> Send for Sendable<T> {}
 
 enum Phase {
-    /// Waiting for the list of displays and windows.
+    /// Waiting for the list of displays and windows; no stream yet.
     Preparing,
-    Starting,
-    Recording(Instant),
-    Stopping(Duration),
+    /// The stream exists and is starting or capturing. `since` is when the
+    /// first frames were recorded.
+    Live { since: Option<Instant> },
+    /// Asked the stream to stop; waiting until the file is finished and the
+    /// capture has stopped (the file is only safe once both have happened).
+    Stopping { at: Instant, length: Duration, finished: bool, stopped: bool },
 }
 
 struct Session {
@@ -75,12 +92,20 @@ struct Session {
     stream: Option<Retained<SCStream>>,
     output: Option<Retained<SCRecordingOutput>>,
     delegate: Option<Retained<Delegate>>,
-    /// Runs after the file is finished, e.g. quitting the app.
+    /// Set by a stop request before the stream existed.
+    cancelled: bool,
+    /// A failure to report once the session ends.
+    error: Option<String>,
+    /// Runs after the session ends, e.g. quitting the app.
     then: Option<Box<dyn FnOnce()>>,
 }
 
 thread_local! {
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+}
+
+fn with<R>(f: impl FnOnce(&mut Session) -> R) -> Option<R> {
+    SESSION.with(|s| s.borrow_mut().as_mut().map(f))
 }
 
 /// `SCRecordingOutput` and microphone capture arrived in macOS 15.
@@ -117,7 +142,6 @@ pub fn start_to(target: Target, path: Option<PathBuf>) {
         };
         let _ = content_tx.send(Event::Content(result));
     });
-    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
     SESSION.with(|s| {
         *s.borrow_mut() = Some(Session {
             target,
@@ -128,9 +152,12 @@ pub fn start_to(target: Target, path: Option<PathBuf>) {
             stream: None,
             output: None,
             delegate: None,
+            cancelled: false,
+            error: None,
             then: None,
         })
     });
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
     app().set_recording_indicator(Some("●"));
     watch();
 }
@@ -140,58 +167,61 @@ pub fn stop() {
     stop_then(|| {});
 }
 
-/// Stops, and runs `then` once the movie file is complete (or right away
-/// when nothing is recording).
+/// Stops, and runs `then` once the session has ended (right away when
+/// nothing is recording).
 pub fn stop_then(then: impl FnOnce() + 'static) {
     if !is_active() {
         return then();
     }
-    let (stream, tx) = SESSION.with(|s| {
-        let mut s = s.borrow_mut();
-        let s = s.as_mut().expect("active session");
+    with(|s| {
         s.then = Some(Box::new(then));
-        let stream = match s.phase {
-            Phase::Recording(t) => {
-                s.phase = Phase::Stopping(t.elapsed());
-                s.stream.clone()
-            }
-            // Not capturing yet: drop the session without a file.
-            Phase::Preparing | Phase::Starting => {
-                let _ = s.tx.send(Event::Failed(String::new()));
-                None
-            }
-            Phase::Stopping(_) => None,
-        };
-        (stream, s.tx.clone())
+        request_stop(s);
     });
-    let Some(stream) = stream else { return };
-    // Stopping the capture also finishes the recording output's file;
-    // `recordingOutputDidFinishRecording` reports when it's written.
-    let done = RcBlock::new(move |error: *mut NSError| {
-        if !error.is_null() {
-            let _ = tx.send(Event::Failed(describe(error)));
+}
+
+/// Moves a live session to `Stopping`. Safe to call more than once.
+fn request_stop(s: &mut Session) {
+    match s.phase {
+        Phase::Preparing => s.cancelled = true,
+        Phase::Live { since } => {
+            s.phase = Phase::Stopping {
+                at: Instant::now(),
+                length: since.map_or(Duration::ZERO, |t| t.elapsed()),
+                finished: false,
+                stopped: s.stream.is_none(),
+            };
+            if let Some(stream) = &s.stream {
+                let tx = s.tx.clone();
+                let done = RcBlock::new(move |error: *mut NSError| {
+                    if !error.is_null() {
+                        eprintln!("recording: stopCapture: {}", describe(error));
+                    }
+                    let _ = tx.send(Event::CaptureStopped);
+                });
+                unsafe { stream.stopCaptureWithCompletionHandler(Some(&done)) };
+            }
         }
-    });
-    unsafe { stream.stopCaptureWithCompletionHandler(Some(&done)) };
+        Phase::Stopping { .. } => {}
+    }
 }
 
 /// Polls the session's events on the main thread and keeps the timer current.
 fn watch() {
-    let events: Vec<Event> = SESSION.with(|s| match s.borrow().as_ref() {
-        Some(s) => s.rx.try_iter().collect(),
-        None => vec![],
-    });
+    let events: Vec<Event> = with(|s| s.rx.try_iter().collect()).unwrap_or_default();
     for e in events {
         handle(e);
-        if !is_active() {
-            return;
-        }
     }
-    let label = SESSION.with(|s| match s.borrow().as_ref().map(|s| &s.phase) {
-        Some(Phase::Recording(t)) => Some(elapsed(t.elapsed())),
-        Some(Phase::Stopping(d)) => Some(elapsed(*d)),
-        Some(_) => Some("●".to_string()),
-        None => None,
+    let timed_out = with(|s| matches!(s.phase, Phase::Stopping { at, .. } if at.elapsed() > STOP_TIMEOUT));
+    if timed_out == Some(true) {
+        with(|s| {
+            s.error.get_or_insert_with(|| "The recording didn't finish cleanly, so the file may not play.".into());
+        });
+        end();
+    }
+    let label = with(|s| match s.phase {
+        Phase::Live { since: Some(t) } => elapsed(t.elapsed()),
+        Phase::Stopping { length, .. } => elapsed(length),
+        _ => "●".to_string(),
     });
     match label {
         Some(l) => {
@@ -203,33 +233,76 @@ fn watch() {
 }
 
 fn handle(e: Event) {
+    if std::env::var_os("SHOT_DEBUG").is_some() {
+        let name = match &e {
+            Event::Content(r) => format!("content ok={}", r.is_ok()),
+            Event::CaptureStarted(r) => format!("capture started {r:?}"),
+            Event::RecordingStarted => "recording started".into(),
+            Event::Finished => "finished".into(),
+            Event::Error(m) => format!("error {m}"),
+            Event::CaptureStopped => "capture stopped".into(),
+        };
+        eprintln!("recording: {name}");
+    }
     match e {
-        Event::Content(Ok(content)) => {
-            if let Err(e) = begin(&content.0) {
-                fail(&e);
+        Event::Content(result) => {
+            if with(|s| s.cancelled) == Some(true) {
+                return end();
+            }
+            let result = result.and_then(|c| begin(&c.0));
+            if let Err(e) = result {
+                with(|s| s.error = Some(e));
+                end();
             }
         }
-        Event::Content(Err(e)) => fail(&e),
-        Event::Started => SESSION.with(|s| {
-            if let Some(s) = s.borrow_mut().as_mut() {
-                if matches!(s.phase, Phase::Starting) {
-                    s.phase = Phase::Recording(Instant::now());
+        Event::CaptureStarted(Ok(())) => {}
+        Event::CaptureStarted(Err(e)) => {
+            // Nothing was captured, so there's no file to wait for.
+            with(|s| {
+                s.error = Some(e);
+                s.stream = None;
+            });
+            end();
+        }
+        Event::RecordingStarted => {
+            with(|s| {
+                if let Phase::Live { since: since @ None } = &mut s.phase {
+                    *since = Some(Instant::now());
                 }
-            }
-        }),
-        Event::Finished => finish(),
-        Event::Failed(e) => fail(&e),
+            });
+        }
+        Event::Finished => {
+            with(|s| {
+                // Finished on its own while live: stop the capture too.
+                request_stop(s);
+                if let Phase::Stopping { finished, .. } = &mut s.phase {
+                    *finished = true;
+                }
+            });
+            end_when_done();
+        }
+        Event::Error(e) => {
+            eprintln!("recording: {e}");
+            with(|s| {
+                s.error.get_or_insert(e);
+                request_stop(s);
+            });
+        }
+        Event::CaptureStopped => {
+            with(|s| {
+                if let Phase::Stopping { stopped, .. } = &mut s.phase {
+                    *stopped = true;
+                }
+            });
+            end_when_done();
+        }
     }
 }
 
-/// Builds the stream once ScreenCaptureKit has listed what's on screen.
+/// Builds and starts the stream once ScreenCaptureKit has listed what's on screen.
 fn begin(content: &SCShareableContent) -> Result<(), String> {
     let mtm = MainThreadMarker::new().expect("main thread");
-    let (target, path, tx) = SESSION.with(|s| {
-        let s = s.borrow();
-        let s = s.as_ref().expect("session");
-        (s.target, s.path.clone(), s.tx.clone())
-    });
+    let (target, path, tx) = with(|s| (s.target, s.path.clone(), s.tx.clone())).ok_or("No recording")?;
     let app = app();
     let (system_audio, mic, clicks) = {
         let s = app.settings.borrow();
@@ -298,20 +371,18 @@ fn begin(content: &SCShareableContent) -> Result<(), String> {
         )
     };
     unsafe { stream.addRecordingOutput_error(&output) }.map_err(|e| e.localizedDescription().to_string())?;
+    // From here on the session owns a stream and must stop it before ending.
+    with(|s| {
+        s.phase = Phase::Live { since: None };
+        s.stream = Some(stream.clone());
+        s.output = Some(output);
+        s.delegate = Some(delegate);
+    });
     let started = RcBlock::new(move |error: *mut NSError| {
-        if !error.is_null() {
-            let _ = tx.send(Event::Failed(describe(error)));
-        }
+        let result = if error.is_null() { Ok(()) } else { Err(describe(error)) };
+        let _ = tx.send(Event::CaptureStarted(result));
     });
     unsafe { stream.startCaptureWithCompletionHandler(Some(&started)) };
-    SESSION.with(|s| {
-        if let Some(s) = s.borrow_mut().as_mut() {
-            s.phase = Phase::Starting;
-            s.stream = Some(stream);
-            s.output = Some(output);
-            s.delegate = Some(delegate);
-        }
-    });
     if app.settings.borrow().play_sound {
         play_sound("Tink");
     }
@@ -340,51 +411,52 @@ fn display_filter(content: &SCShareableContent, p: Pt) -> Result<(Retained<SCCon
     }
 }
 
-/// The movie is complete on disk.
-fn finish() {
-    let Some(s) = take() else { return };
-    if app().settings.borrow().play_sound {
-        play_sound("Screen Capture");
-    }
-    let dir = s.path.parent().and_then(|d| d.file_name()).map_or("folder".into(), |n| n.to_string_lossy());
-    toast(&format!("Saved recording to {dir}"));
-    ui::reveal_in_finder(&s.path);
-    if let Some(then) = s.then {
-        then();
+/// Ends the session once the file is finished and the capture stopped.
+fn end_when_done() {
+    let done = with(|s| matches!(s.phase, Phase::Stopping { finished: true, stopped: true, .. }));
+    if done == Some(true) {
+        end();
     }
 }
 
-fn fail(message: &str) {
-    let Some(s) = take() else { return };
-    if !message.is_empty() {
-        eprintln!("recording failed: {message}");
-    }
-    if let Some(stream) = &s.stream {
+/// Ends the session: reports the result and runs the pending `then`.
+fn end() {
+    let Some(s) = SESSION.with(|s| s.borrow_mut().take()) else { return };
+    app().set_recording_indicator(None);
+    // Ending while live (the output finished on its own): stop capturing too.
+    if let (Phase::Live { .. }, Some(stream)) = (&s.phase, &s.stream) {
         unsafe { stream.stopCaptureWithCompletionHandler(None) };
     }
-    let started = matches!(s.phase, Phase::Recording(_) | Phase::Stopping(_));
-    if started && s.path.exists() {
-        // Keep what was recorded; the file may still play.
-        if !message.is_empty() {
-            alert("Recording stopped", &format!("{message}\n\nWhat was recorded so far is in {}.", s.path.display()));
+    let has_file = std::fs::metadata(&s.path).is_ok_and(|m| m.len() > 0);
+    let recorded = has_file && matches!(s.phase, Phase::Stopping { .. } | Phase::Live { since: Some(_) });
+    if recorded {
+        if app().settings.borrow().play_sound {
+            play_sound("Screen Capture");
+        }
+        match &s.error {
+            Some(e) => {
+                alert("Recording stopped early", &format!("{e}\n\nWhat was recorded is in {}.", s.path.display()))
+            }
+            None => {
+                let dir = s.path.parent().and_then(|d| d.file_name()).map_or("folder".into(), |n| n.to_string_lossy());
+                toast(&format!("Saved recording to {dir}"));
+            }
         }
         ui::reveal_in_finder(&s.path);
     } else {
-        // A failed start leaves an empty or unplayable file behind.
+        // Nothing usable was written.
         let _ = std::fs::remove_file(&s.path);
-        if !message.is_empty() {
-            alert("Recording failed", message);
+        if let Some(e) = &s.error {
+            eprintln!("recording failed: {e}");
+            alert("Recording failed", e);
         }
     }
+    // Keep the stream objects alive until here; a stream dropped while
+    // capturing keeps writing on its own.
+    drop((s.stream, s.output, s.delegate));
     if let Some(then) = s.then {
         then();
     }
-}
-
-fn take() -> Option<Session> {
-    let s = SESSION.with(|s| s.borrow_mut().take());
-    app().set_recording_indicator(None);
-    s
 }
 
 fn output_path() -> Option<PathBuf> {
@@ -429,6 +501,7 @@ struct Ivars {
 define_class!(
     // Called on ScreenCaptureKit's queues, never the main thread.
     #[unsafe(super(NSObject))]
+    #[name = "ShotRecordingDelegate"]
     #[ivars = Ivars]
     struct Delegate;
 
@@ -437,19 +510,19 @@ define_class!(
     unsafe impl SCStreamDelegate for Delegate {
         #[unsafe(method(stream:didStopWithError:))]
         fn stream_did_stop(&self, _stream: &SCStream, error: &NSError) {
-            self.send(Event::Failed(error.localizedDescription().to_string()));
+            self.send(Event::Error(error.localizedDescription().to_string()));
         }
     }
 
     unsafe impl SCRecordingOutputDelegate for Delegate {
         #[unsafe(method(recordingOutputDidStartRecording:))]
         fn did_start(&self, _output: &SCRecordingOutput) {
-            self.send(Event::Started);
+            self.send(Event::RecordingStarted);
         }
 
         #[unsafe(method(recordingOutput:didFailWithError:))]
         fn did_fail(&self, _output: &SCRecordingOutput, error: &NSError) {
-            self.send(Event::Failed(error.localizedDescription().to_string()));
+            self.send(Event::Error(error.localizedDescription().to_string()));
         }
 
         #[unsafe(method(recordingOutputDidFinishRecording:))]

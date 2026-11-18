@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-11-18
+
+- Fix: stopping a recording now always finishes the file. In 0.2.0 Stop could leave the recording running in the background and the movie unplayable.
+- Recording an area keeps the selection adjustable, with Microphone and System Audio switches and a Record button under it.
+- Record Microphone and Record System Audio switches in the menu bar menu.
+- `Shot record-to <file.mp4> [seconds] [x,y,w,h]` can record an area. `SHOT_DEBUG=1` logs recording events to stderr.
+
 ## 0.2.0 — 2026-11-18
 
 - Screen recording: area, window or whole display to MP4 with system audio and/or microphone, click highlights, and a stop button with a timer in the menu bar. `Shot record`, `Shot record-fullscreen` and `Shot record-to <file.mp4> <seconds>` from the command line. Needs macOS 15.
