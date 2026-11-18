@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1 — 2026-11-18
+
+- Command line: `Shot capture-window <app name> <file.png>` saves an app's frontmost window.
+
+## 0.1.0 — 2026-10-05
 
 First public version.
 
