@@ -70,8 +70,11 @@ pub fn app() -> Rc<App> {
 pub fn start(mtm: MainThreadMarker) {
     // `shot capture-to <file.png>`: silent capture of every display, for scripts.
     let args: Vec<String> = std::env::args().collect();
-    if let (Some("capture-to"), Some(path)) = (args.get(1).map(String::as_str), args.get(2)) {
-        std::process::exit(capture_to(mtm, path));
+    match (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
+        (Some("capture-to"), Some(path), _) => std::process::exit(capture_to(mtm, path)),
+        // `shot capture-window <app name> <file.png>`: the frontmost window of an app.
+        (Some("capture-window"), Some(app_name), Some(path)) => std::process::exit(capture_window_to(app_name, path)),
+        _ => {}
     }
     let support = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("Shot");
     let config_path = support.join("settings.json");
@@ -492,6 +495,25 @@ fn capture_to(mtm: MainThreadMarker, path: &str) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("capture-to: {e}");
+            1
+        }
+    }
+}
+
+fn capture_window_to(app_name: &str, path: &str) -> i32 {
+    if !capture::has_permission() {
+        eprintln!("capture-window: Shot has no Screen Recording permission");
+        return 2;
+    }
+    let wanted = app_name.to_lowercase();
+    let Some(w) = capture::windows().into_iter().find(|w| w.owner.to_lowercase().contains(&wanted)) else {
+        eprintln!("capture-window: no window of \"{app_name}\" on screen");
+        return 1;
+    };
+    match capture::window(w.id, true).map(|img| img.save(path)) {
+        Some(Ok(())) => 0,
+        _ => {
+            eprintln!("capture-window: couldn't capture or save");
             1
         }
     }
