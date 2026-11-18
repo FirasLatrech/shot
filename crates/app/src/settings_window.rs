@@ -235,6 +235,12 @@ fn capture_tab(sw: &Rc<SettingsWindow>) -> Retained<NSView> {
             ),
         ),
         (
+            "Recording:",
+            checkbox(sw, "Record system audio", |s| s.record_system_audio, |s, v| s.record_system_audio = v),
+        ),
+        ("", checkbox(sw, "Record microphone", |s| s.record_microphone, |s, v| s.record_microphone = v)),
+        ("", checkbox(sw, "Highlight mouse clicks", |s| s.record_show_clicks, |s, v| s.record_show_clicks = v)),
+        (
             "Self-timer:",
             popup(
                 sw,

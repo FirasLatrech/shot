@@ -35,6 +35,8 @@ pub enum Mode {
     Text,
     /// Area selection, then a countdown, then a live capture.
     SelfTimer,
+    /// Area or window (click) to record as a video.
+    Record,
 }
 
 /// What the finished selection should turn into.
@@ -108,7 +110,8 @@ pub fn start(mode: Mode) {
         return;
     }
     let mtm = app.mtm;
-    let freeze = app.settings.borrow().freeze_screen && mode != Mode::SelfTimer;
+    // Live modes show the real screen: a frozen frame would flash away.
+    let freeze = app.settings.borrow().freeze_screen && !matches!(mode, Mode::SelfTimer | Mode::Record);
     let displays = capture::displays(mtm);
     let frozen: Vec<_> = displays
         .iter()
@@ -245,6 +248,10 @@ impl Selection {
         if rect.w < 2.0 || rect.h < 2.0 {
             return self.cancel();
         }
+        if self.mode.get() == Mode::Record {
+            self.close();
+            return crate::record::start(crate::record::Target::Area(rect));
+        }
         {
             let app = app();
             app.settings.borrow_mut().last_selection = Some(rect);
@@ -261,6 +268,9 @@ impl Selection {
     fn finish_window(&self, i: usize) {
         let Some(w) = self.windows.get(i).cloned() else { return };
         self.close();
+        if self.mode.get() == Mode::Record {
+            return crate::record::start(crate::record::Target::Window { id: w.id, bounds: w.bounds });
+        }
         let app = app();
         let (shadow, background) = {
             let s = app.settings.borrow();
@@ -520,6 +530,7 @@ impl Selection {
             let text = match self.mode.get() {
                 Mode::Text => "Drag over text to copy it • Esc: cancel",
                 Mode::SelfTimer => "Drag the area for the self-timer • Esc: cancel",
+                Mode::Record => "Drag to record an area • Click: window or whole screen • Esc: cancel",
                 Mode::AllInOne => "Drag to select • Enter: capture • Esc: cancel",
                 _ => "Drag to capture • Click: window • Space: window mode • Esc: cancel",
             };
@@ -606,10 +617,15 @@ impl ViewDelegate for Selection {
         let tiny = rect.is_none_or(|r| r.w < 4.0 || r.h < 4.0);
         if tiny && matches!(drag, Some(Drag::New(_))) {
             // A plain click: capture the window under the cursor.
-            if mode == Mode::Area {
+            if matches!(mode, Mode::Area | Mode::Record) {
                 if let Some(i) = self.windows.iter().position(|w| w.bounds.contains(g)) {
                     return self.finish_window(i);
                 }
+            }
+            // Recording: a click on the desktop records the whole display.
+            if mode == Mode::Record {
+                self.close();
+                return crate::record::start(crate::record::Target::Display(g));
             }
             self.state.borrow_mut().rect = None;
             self.redraw();

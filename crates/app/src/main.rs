@@ -10,6 +10,7 @@ mod history_window;
 mod ocr;
 mod overlay;
 mod pin;
+mod record;
 mod selection;
 mod settings_window;
 mod toast;

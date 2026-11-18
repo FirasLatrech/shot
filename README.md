@@ -21,7 +21,7 @@ On first launch macOS asks for **Screen Recording** permission (System Settings 
 
 The default shortcuts (⇧⌘3 / ⇧⌘4 / ⇧⌘5) collide with macOS's own screenshot shortcuts. Turn those off in System Settings → Keyboard → Keyboard Shortcuts → Screenshots, or pick other shortcuts in Shot → Settings → Shortcuts.
 
-Command line (handy for scripts): `Shot area` triggers an action at launch (also `all-in-one`, `window`, `fullscreen`, `previous`, `self-timer`, `text`, `history`, `settings`). `Shot open <file>` opens an image or `.shot` project in the editor, and `Shot capture-to <file.png>` silently captures every display and exits. From a bundle, run them as `open -n Shot.app --args …`.
+Command line (handy for scripts): `Shot area` triggers an action at launch (also `all-in-one`, `window`, `fullscreen`, `previous`, `self-timer`, `text`, `record`, `record-fullscreen`, `history`, `settings`). `Shot open <file>` opens an image or `.shot` project in the editor, and `Shot capture-to <file.png>` silently captures every display and exits. From a bundle, run them as `open -n Shot.app --args …`.
 
 ## What's in phase 1
 
@@ -32,6 +32,7 @@ Command line (handy for scripts): `Shot area` triggers an action at launch (also
 | **Quick Access Overlay** | Thumbnail card in a configurable corner. Copy, save, annotate, pin, OCR. Drag & drop into any app, double-click to annotate, swipe to dismiss, auto-close, right-click menu, restore recently closed, hide all overlays at once, adjustable size. |
 | **Annotate** | Tools: crop (aspect ratios, edge snapping), rectangle, filled rectangle, ellipse, line, arrow (standard / thin / double / curved with a draggable bend), text (7 styles, multi-line), pencil (auto-smoothed), highlighter, counter, blur (secure / smooth), randomized pixelate, spotlight. Select/move/delete/nudge, edit text again, color well with screen eyedropper plus saved palette, undo/redo, rotate, flip, combine images by drag-drop or ⌘V, pinch zoom, "Drag me", share sheet, editable `.shot` project files. |
 | **Background tool** | 20 backdrops plus custom images, padding, corner radius, shadow, 9-way alignment, social aspect ratios, Auto Balance, saved presets. |
+| **Screen recording** | Record an area, a window (click it) or a whole display to MP4 (H.264 + AAC) with system audio and/or your microphone, at up to 60 fps and Retina resolution. Optional click highlights. The menu bar icon becomes a stop button with a timer; the same shortcut (⇧⌘6 by default) stops it. Shot's own windows and sounds stay out of the video. Needs macOS 15. |
 | **OCR** | On-device Vision text recognition (multi-language) plus QR/barcode reading, copied to the clipboard. |
 | **Floating pins** | Always on top; drag to move, scroll/pinch to resize, ⌥-scroll for opacity, arrow keys to nudge (⇧ moves 10 px), Lock Mode for click-through. |
 | **History** | Every capture is kept for 1 day / 1 week / 1 month. Filterable grid; restore, annotate, pin, copy, drag out, delete. |
@@ -39,7 +40,7 @@ Command line (handy for scripts): `Shot area` triggers an action at launch (also
 
 ## Not built yet (later phases)
 
-- **Phase 2: Recording.** MP4/GIF screen recording with microphone and system audio, click and keystroke overlays, camera overlay. This needs ScreenCaptureKit and AVFoundation.
+- **Phase 2: Recording, the rest.** GIF export, keystroke overlay, camera overlay, pause/resume, and a preview card after recording.
 - **Phase 3: Video editor.** Smart zooms, cursor smoothing, motion blur, platform export presets.
 - **Phase 4: Scrolling capture**, and Cloud (it needs a backend service: links, passwords, expiry, teams).
 - Highlighter "smart text size detection", and Dark/Light toolbar theming polish.
@@ -66,6 +67,7 @@ Everything stays on your Mac. Captures, history and settings live in `~/Library/
 
 ## Known limitations
 
+- Screen recording needs macOS 15 or later (it uses ScreenCaptureKit's `SCRecordingOutput`). With both system audio and microphone on, the microphone may be written as a separate audio track, which some players don't play.
 - Screen capture uses `CGWindowListCreateImage`, which Apple has deprecated in favor of ScreenCaptureKit. It still works on macOS 13–26; moving to ScreenCaptureKit is planned together with screen recording.
 - Shot's overlay windows are excluded from screen captures by design. Set `SHOT_DEV_VISIBLE=1` to include them when working on the UI.
 

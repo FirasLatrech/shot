@@ -26,8 +26,8 @@ use shot_core::{
 };
 
 use crate::{
-    capture, editor, history_window, ocr, overlay, pin, selection, settings_window,
-    ui::{self, Targets},
+    capture, editor, history_window, ocr, overlay, pin, record, selection, settings_window,
+    ui::{self, Target, Targets},
 };
 
 /// A finished capture as it travels between overlay, editor, pins and history.
@@ -57,6 +57,8 @@ pub struct App {
     status: RefCell<Option<Retained<NSStatusItem>>>,
     /// Action targets of the current menu bar menu.
     targets: RefCell<Targets>,
+    /// The status button's click-to-stop target while recording.
+    stop_target: RefCell<Option<Retained<Target>>>,
 }
 
 thread_local! {
@@ -100,6 +102,7 @@ pub fn start(mtm: MainThreadMarker) {
         hotkeys: RefCell::default(),
         status: RefCell::default(),
         targets: RefCell::default(),
+        stop_target: RefCell::default(),
     });
     APP.with(|a| a.set(app.clone())).ok().expect("started once");
 
@@ -118,6 +121,17 @@ pub fn start(mtm: MainThreadMarker) {
     // `shot <action>` triggers an action at launch, e.g. `shot area`.
     // Also `shot settings` and `shot open <image or .shot file>`.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `shot record-to <file.mp4> <seconds>`: records the main display, then quits.
+    if let (Some("record-to"), Some(file)) = (args.first().map(String::as_str), args.get(1)) {
+        let secs = args.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(5.0);
+        let file = PathBuf::from(file);
+        let center = capture::displays(mtm).first().map_or(shot_core::Pt::new(0.0, 0.0), |d| d.bounds.center());
+        after(0.3, move || record::start_to(record::Target::Display(center), Some(file)));
+        after(0.3 + secs, || {
+            record::stop_then(|| NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None))
+        });
+        return ns_app.run();
+    }
     match (args.first().map(String::as_str), args.get(1)) {
         (Some("settings"), _) => after(0.2, settings_window::show),
         (Some("open"), Some(file)) => {
@@ -136,6 +150,11 @@ pub fn start(mtm: MainThreadMarker) {
 
 impl App {
     pub fn run(&self, action: Action) {
+        let records = matches!(action, Action::RecordScreen | Action::RecordFullscreen);
+        // A recording shortcut pressed again stops the recording.
+        if records && record::is_active() {
+            return record::stop();
+        }
         let captures = !matches!(action, Action::OpenHistory | Action::RestoreOverlay | Action::ToggleOverlays);
         if captures && !capture::has_permission() {
             return permission_alert();
@@ -148,6 +167,8 @@ impl App {
             Action::SelfTimer => selection::start(selection::Mode::SelfTimer),
             Action::CaptureFullscreen => self.capture_fullscreen(),
             Action::CapturePrevious => self.capture_previous(),
+            Action::RecordScreen => selection::start(selection::Mode::Record),
+            Action::RecordFullscreen => record::start(record::Target::Display(self.mouse())),
             Action::OpenHistory => history_window::show(),
             Action::RestoreOverlay => self.restore_overlay(),
             Action::ToggleOverlays => self.toggle_overlays(),
@@ -162,11 +183,16 @@ impl App {
         }
     }
 
-    /// Captures the display under the mouse.
-    fn capture_fullscreen(&self) {
+    /// The mouse position in global CG points.
+    fn mouse(&self) -> shot_core::Pt {
         let mouse = objc2_app_kit::NSEvent::mouseLocation();
         let main_h = capture::main_height(self.mtm);
-        let p = shot_core::Pt::new(mouse.x as f32, (main_h - mouse.y) as f32);
+        shot_core::Pt::new(mouse.x as f32, (main_h - mouse.y) as f32)
+    }
+
+    /// Captures the display under the mouse.
+    fn capture_fullscreen(&self) {
+        let p = self.mouse();
         let displays = capture::displays(self.mtm);
         let Some(d) = displays.iter().find(|d| d.bounds.contains(p)).or(displays.first()) else { return };
         if let Some(img) = capture::region(d.bounds) {
@@ -361,6 +387,9 @@ impl App {
             menu.addItem(&action(a, symbol));
         }
         menu.addItem(&sep());
+        menu.addItem(&action(Action::RecordScreen, "record.circle"));
+        menu.addItem(&action(Action::RecordFullscreen, "video"));
+        menu.addItem(&sep());
         menu.addItem(&action(Action::CaptureText, "text.viewfinder"));
         menu.addItem(&sep());
         menu.addItem(&item("Open Image…", "photo", Some("cmd+KeyO"), Box::new(|| app().open_image_dialog())));
@@ -402,12 +431,57 @@ impl App {
             "Quit Shot",
             "power",
             Some("cmd+KeyQ"),
-            Box::new(|| NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None)),
+            // Finish an ongoing recording's file first, or it won't play.
+            Box::new(|| {
+                record::stop_then(|| NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None))
+            }),
         ));
         if let Some(status) = self.status.borrow().as_ref() {
             status.setMenu(Some(&menu));
         }
         *self.targets.borrow_mut() = targets;
+    }
+
+    /// While recording, the menu bar icon becomes a stop button showing
+    /// `label` (the elapsed time); `None` restores the normal menu.
+    pub fn set_recording_indicator(&self, label: Option<&str>) {
+        let Some(status) = self.status.borrow().clone() else { return };
+        let Some(button) = status.button(self.mtm) else { return };
+        match label {
+            Some(label) => {
+                if self.stop_target.borrow().is_none() {
+                    let target = Target::new(self.mtm, |_| record::stop());
+                    status.setMenu(None);
+                    button.setImage(ui::symbol("stop.circle.fill").as_deref());
+                    button.setContentTintColor(Some(&objc2_app_kit::NSColor::systemRedColor()));
+                    button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
+                    button.setFont(Some(&objc2_app_kit::NSFont::monospacedDigitSystemFontOfSize_weight(12.0, 0.0)));
+                    button.setToolTip(Some(ns_string!("Stop Recording")));
+                    unsafe {
+                        button.setTarget(Some(&target));
+                        button.setAction(Some(sel!(fire:)));
+                    }
+                    *self.stop_target.borrow_mut() = Some(target);
+                }
+                let title = format!(" {label}");
+                if button.title().to_string() != title {
+                    button.setTitle(&NSString::from_str(&title));
+                }
+            }
+            None => {
+                if self.stop_target.borrow_mut().take().is_some() {
+                    unsafe {
+                        button.setTarget(None);
+                        button.setAction(None);
+                    }
+                    button.setTitle(ns_string!(""));
+                    button.setToolTip(None);
+                    button.setContentTintColor(None);
+                    button.setImage(Some(&ui::logo_template(15.0)));
+                    self.rebuild_menu();
+                }
+            }
+        }
     }
 }
 
@@ -528,6 +602,8 @@ fn action_from_arg(arg: &str) -> Option<Action> {
         "previous" => Action::CapturePrevious,
         "self-timer" => Action::SelfTimer,
         "text" => Action::CaptureText,
+        "record" => Action::RecordScreen,
+        "record-fullscreen" => Action::RecordFullscreen,
         "history" => Action::OpenHistory,
         _ => return None,
     })
@@ -617,7 +693,7 @@ fn temp_dir() -> PathBuf {
     std::env::temp_dir().join("Shot")
 }
 
-fn timestamp() -> String {
+pub fn timestamp() -> String {
     let f = NSDateFormatter::new();
     f.setDateFormat(Some(ns_string!("yyyy-MM-dd 'at' HH.mm.ss")));
     f.stringFromDate(&NSDate::now()).to_string()

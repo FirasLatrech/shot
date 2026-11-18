@@ -19,13 +19,15 @@ pub enum Action {
     CapturePrevious,
     SelfTimer,
     CaptureText,
+    RecordScreen,
+    RecordFullscreen,
     OpenHistory,
     RestoreOverlay,
     ToggleOverlays,
 }
 
 impl Action {
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 12] = [
         Action::AllInOne,
         Action::CaptureArea,
         Action::CaptureWindow,
@@ -33,6 +35,8 @@ impl Action {
         Action::CapturePrevious,
         Action::SelfTimer,
         Action::CaptureText,
+        Action::RecordScreen,
+        Action::RecordFullscreen,
         Action::OpenHistory,
         Action::RestoreOverlay,
         Action::ToggleOverlays,
@@ -47,6 +51,8 @@ impl Action {
             Action::CapturePrevious => "Capture Previous Area",
             Action::SelfTimer => "Self-Timer",
             Action::CaptureText => "Capture Text (OCR)",
+            Action::RecordScreen => "Record Screen",
+            Action::RecordFullscreen => "Record Fullscreen",
             Action::OpenHistory => "Capture History",
             Action::RestoreOverlay => "Restore Recently Closed",
             Action::ToggleOverlays => "Hide/Show Overlays",
@@ -102,6 +108,10 @@ pub struct Settings {
     pub window_background: Option<Background>,
     pub self_timer_secs: u32,
     pub history_days: u32,
+    /// Screen recordings: what goes into the movie besides the picture.
+    pub record_system_audio: bool,
+    pub record_microphone: bool,
+    pub record_show_clicks: bool,
     pub hotkeys: BTreeMap<Action, String>,
     pub custom_colors: Vec<Color>,
     pub background_presets: Vec<(String, Background)>,
@@ -117,6 +127,7 @@ impl Default for Settings {
             (Action::CaptureFullscreen, "shift+cmd+Digit3"),
             (Action::CaptureWindow, "shift+cmd+Digit5"),
             (Action::CaptureText, "shift+cmd+KeyT"),
+            (Action::RecordScreen, "shift+cmd+Digit6"),
             (Action::RestoreOverlay, "shift+cmd+KeyR"),
         ]
         .into_iter()
@@ -139,6 +150,9 @@ impl Default for Settings {
             window_background: None,
             self_timer_secs: 5,
             history_days: 30,
+            record_system_audio: true,
+            record_microphone: false,
+            record_show_clicks: true,
             hotkeys,
             custom_colors: Vec::new(),
             background_presets: Vec::new(),

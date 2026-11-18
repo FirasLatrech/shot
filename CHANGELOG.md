@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0 — 2026-11-18
+
+- Screen recording: area, window or whole display to MP4 with system audio and/or microphone, click highlights, and a stop button with a timer in the menu bar. `Shot record`, `Shot record-fullscreen` and `Shot record-to <file.mp4> <seconds>` from the command line. Needs macOS 15.
+
 ## 0.1.1 — 2026-11-18
 
 - Command line: `Shot capture-window <app name> <file.png>` saves an app's frontmost window.
